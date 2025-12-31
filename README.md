@@ -1,57 +1,111 @@
-# GridMaster Pro
+<div align="center">
 
-GridMaster Pro is a MetaTrader 5 Expert Advisor (EA) that implements a grid trading strategy. It automatically opens buy orders at regular price intervals and manages them to maximize profits.
+# 📉 GridMaster Pro — Algorithmic Grid Trading System
 
-## Features
+[![MQL5](https://img.shields.io/badge/MQL5-MetaTrader_5-green?style=for-the-badge&logo=metatrader-5)](https://www.metatrader5.com/en)
+[![Strategy](https://img.shields.io/badge/Strategy-Grid_Trading-blue?style=for-the-badge)](https://en.wikipedia.org/wiki/Grid_trading)
+[![License](https://img.shields.io/badge/License-MIT-green?style=for-the-badge)](LICENSE)
 
-- **Grid Trading**: Automatically opens buy orders at specified intervals (grid levels).
-- **Retry Mechanism**: Handles server busy errors by retrying the order submission.
-- **Customizable Parameters**: Lot size, grid distance, and maximum orders can be configured.
+**A highly robust MetaTrader 5 Expert Advisor (EA) implementing a deterministic grid trading strategy with advanced error handling and execution optimization.**
 
-## Installation
+*📊 Efficient • 🛡️ Resilient • ⚡ Automated*
 
-1. Download the `GridMasterPro.mq5` file from this repository.
-2. Place the file in the `Experts` directory of your MetaTrader 5 installation.
-3. Restart MetaTrader 5 or refresh the Expert Advisors section.
-4. Attach the EA to a chart, configure the input parameters, and start trading.
+[Report Bug](https://github.com/sajidmahamud835/grid-master-pro-mt5-ea/issues) · [Request Feature](https://github.com/sajidmahamud835/grid-master-pro-mt5-ea/issues)
 
-## Input Parameters
+</div>
 
-- **LotSize**: The size of each order.
-- **GridDistance**: Distance in points between grid levels.
-- **MaxOrders**: Maximum number of orders in the grid.
+---
 
-## Usage
+## 🔬 About The Project
 
-1. Attach the EA to a chart with sufficient historical data.
-2. Set the desired input parameters.
-3. Enable "AutoTrading" in MetaTrader 5.
-4. Monitor the EA's performance and adjust settings as needed.
+**GridMaster Pro** is a quantitative trading tool designed to exploit market volatility in ranging markets. Unlike trend-following systems that rely on prediction, this project utilizes a grid execution model to capture profit from mean-reversion movements.
 
-## Example
+From a research perspective, this EA serves as a baseline for measuring **Order Execution Quality** and **Strategy Robustness**. It implements rigid capital allocation rules and studies the impact of market noise on static grid intervals.
+
+### 🎯 Key Design Principles
+1.  **Deterministic Execution**: Removes emotional bias by adhering to strict mathematical entry/exit rules.
+2.  **Resilience**: Built-in "Retry Mechanism" to handle broker requotes and server busy errors during high-volatility events.
+3.  **Capital Efficiency**: Optimized for calculating maximum drawdown potential based on input parameters.
+
+---
+
+## ⚙️ Algorithms & Inputs
+
+The core logic revolves around placing buy limits below the current price (or buy stops above) at fixed intervals.
+
+| Parameter | Type | Description |
+|-----------|------|-------------|
+| `LotSize` | `double` | Fixed volume for each grid order. |
+| `GridDistance` | `double` | The gap (in points) between subsequent orders (Noise Filter). |
+| `MaxOrders` | `int` | Hard cap on open positions to control leverage exposure. |
 
 ```mql5
+// Example Configuration
 input double LotSize = 0.1;
-input double GridDistance = 50; // Distance between orders in points
-input int MaxOrders = 10; // Maximum number of orders in the grid
+input double GridDistance = 50; 
+input int MaxOrders = 10; 
 ```
 
-## Contribution
+---
 
-Contributions are welcome! Please see the [Contribution Guide](CONTRIBUTING.md) for details on how to get involved.
+## ✨ Features
 
-## Disclaimer and Risk Warnings
+### 🟢 Implemented Capabilities
 
-Trading any financial market involves risk. All forms of trading carry a high level of risk, so you should only speculate with money you can afford to lose. You can lose more than your initial deposit and stake. Please ensure your chosen method matches your investment objectives, familiarize yourself with the risks involved, and if necessary, seek independent advice.
+- [x] **Auto-Execution**: Autonomous order placement without user intervention.
+- [x] **Error Handling**: Graceful recovery from `TRADE_RETCODE_CONNECTION` and timeout errors.
+- [x] **Visual Debugging**: Comments on chart indicating system status and next grid levels.
+- [x] **MQL5 Native**: Compiled to highly efficient bytecode for millisecond-level execution.
 
-### NFA and CFTC Required Disclaimers
+### 🗓️ Research & Development Plan (Todo)
 
-Trading in the Foreign Exchange market, Futures Market, Options, or the Stock Market is a challenging opportunity where above-average returns are available for educated and experienced investors who are willing to take above-average risks. However, before deciding to participate in Foreign Exchange (FX) trading, or in Trading Futures, Options, or stocks, you should carefully consider your investment objectives, level of experience, and risk appetite.
+- [ ] **Dynamic Grids**: Implement Average True Range (ATR) based grid spacing to adapt to changing volatility.
+- [ ] **Hedging Module**: Add "Sell" grid logic to create a full hedged mesh functionality.
+- [ ] **Martingale Option**: (Experimental) Add variable lot sizing (1.0x, 1.5x, 2.0x) for aggressive recovery.
+- [ ] **Backtesting Reports**: Publish 5-year backtests on EURUSD and GBPUSD pairs.
 
-## License
+---
 
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+## 🚀 Getting Started
 
-## Author
+### Installation
 
-[Sajid Mahamud](https://www.mql5.com/en/users/sajidmahamud835)
+1.  **Download**: Get the latest `GridMasterPro.mq5` from the repository.
+2.  **Deploy**: Move the file to your MetaTrader 5 Data Folder: `.../MQL5/Experts/`.
+3.  **Compile**: Open MetaEditor (F4), open the file, and click "Compile".
+4.  **Activate**:
+    -   Open MT5 Terminal.
+    -   Drag "GridMasterPro" onto a chart (e.g., EURUSD H1).
+    -   Enable "Algo Trading" in the toolbar.
+
+### ⚠️ Risk Warning
+
+Trading Forex and CFDs carries a high level of risk and may not be suitable for all investors. The high degree of leverage can work against you as well as for you. **Grid strategies, in particular, can sustain large drawdowns during strong unidirectional trends.**
+
+*Always test on a Demo account before deploying real capital.*
+
+---
+
+## 🤝 Related Projects
+
+Explore other components of the research portfolio:
+
+1.  **[MarketSync-EA](../MarketSync-EA)** - The "Smart" evolution of this project, using AI to determine when to deploy the grid.
+2.  **[Slippage Tracker Client](../slippage-tracker-client)** - A tool to monitor if your broker is executing your grid orders fairly.
+3.  **[WhatsApp Bot](../whatsapp-bot)** - Integration for sending trade alerts directly to your phone.
+
+---
+
+## 📄 License
+
+Distributed under the MIT License. See `LICENSE` for more information.
+
+---
+
+<div align="center">
+
+**[Sajid Mahamud](https://www.mql5.com/en/users/sajidmahamud835)**
+
+*MQL5 Developer • Quantitative Researcher*
+
+</div>
