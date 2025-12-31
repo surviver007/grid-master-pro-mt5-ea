@@ -90,9 +90,9 @@ Trading Forex and CFDs carries a high level of risk and may not be suitable for 
 
 Explore other components of the research portfolio:
 
-1.  **[MarketSync-EA](../MarketSync-EA)** - The "Smart" evolution of this project, using AI to determine when to deploy the grid.
-2.  **[Slippage Tracker Client](../slippage-tracker-client)** - A tool to monitor if your broker is executing your grid orders fairly.
-3.  **[WhatsApp Bot](../whatsapp-bot)** - Integration for sending trade alerts directly to your phone.
+1.  **[MarketSync-EA](https://github.com/sajidmahamud835/MarketSync-EA)** - The "Smart" evolution of this project, using AI to determine when to deploy the grid.
+2.  **[Slippage Tracker Client](https://github.com/sajidmahamud835/slippage-tracker-client)** - A tool to monitor if your broker is executing your grid orders fairly.
+3.  **[WhatsApp Bot](https://github.com/sajidmahamud835/whatsapp-bot)** - Integration for sending trade alerts directly to your phone.
 
 ---
 
