@@ -5,269 +5,328 @@
 //+------------------------------------------------------------------+
 #property copyright "Copyright 2024, Sajid."
 #property link      "https://www.mql5.com/en/users/sajidmahamud835"
-#property version   "1.04"
+#property version   "2.00"
 #property strict
+#property description "GridMaster Pro v2 — Bi-directional ATR grid with proper MM, min-stop awareness, and drawdown protection."
 
-//--- Input Parameters
-input double LotSize = 0.1;                 // Lot size for each order
-input int MaxOrders = 10;                   // Maximum number of orders in the grid
-input int ATRPeriod = 14;                   // ATR period for dynamic grid adjustment
-input double ATRMultiplier = 1.5;           // Multiplier for ATR to calculate grid distance
-input int TrendPeriod = 50;                 // Period for detecting market trend
+#include <Trade\Trade.mqh>
 
-input bool UseTakeProfit = true;            // Enable/Disable Take Profit
-input double DefaultTP = 100.0;             // Default Take Profit in points
+//--- Enums
+enum ENUM_GRID_MODE {
+    GRID_NEUTRAL  = 0,  // Neutral: BUY below + SELL above
+    GRID_BULLISH  = 1,  // Bullish: BUY only
+    GRID_BEARISH  = 2,  // Bearish: SELL only
+};
 
-input bool UseStopLoss = true;              // Enable/Disable Stop Loss
-input double DefaultSL = 500.0;             // Default Stop Loss in points
+enum ENUM_LOT_MODE {
+    LOT_FIXED     = 0,  // Fixed lot size
+    LOT_DYNAMIC   = 1,  // Risk-based (% of balance per order)
+};
 
-input double VolatilityThreshold = 20.0;    // ATR threshold for volatility
+//--- Input Parameters — Grid
+input ENUM_GRID_MODE GridMode        = GRID_NEUTRAL;   // Grid Mode
+input int            MaxOrders       = 5;              // Max orders per side
+input int            ATRPeriod       = 14;             // ATR period
+input double         ATRMultiplier   = 1.5;            // ATR multiplier for grid distance
 
-input bool UseTrailingStop = true;          // Enable/Disable Trailing Stop
-input double TrailingStopPoints = 50;       // Trailing Stop in points
+//--- Input Parameters — Orders
+input ENUM_LOT_MODE  LotMode         = LOT_FIXED;      // Lot sizing mode
+input double         LotSize         = 0.1;            // Fixed lot size
+input double         RiskPercent     = 1.0;            // Risk % per order (dynamic mode)
+input bool           UseTakeProfit   = true;           // Enable Take Profit
+input double         DefaultTP       = 200.0;          // Min TP in points (auto-adjusted for broker)
+input bool           UseStopLoss     = true;           // Enable Stop Loss
+input double         DefaultSL       = 1000.0;         // Min SL in points (auto-adjusted for broker)
+input bool           UseTrailingStop = true;           // Enable Trailing Stop
+input double         TrailingPoints  = 100.0;          // Trailing stop in points
+input double         TrailingStep    = 20.0;           // Trailing step in points
 
-input bool DebugMode = false;               // Enable/Disable Debug Mode
+//--- Input Parameters — Risk Management
+input double         MaxDrawdownPct  = 5.0;            // Max drawdown % before pausing
+input bool           CloseOnDrawdown = true;           // Close all orders on drawdown breach
+
+//--- Input Parameters — Magic & Debug
+input int            MagicBase       = 47291;          // Base magic number
+input bool           DebugMode       = false;          // Enable debug logging
 
 //--- Global Variables
-double gridLevels[];                        // Array to store grid levels
-int ordersCount = 0;                        // Counter for the number of orders placed
-string successLogFile = "GridMasterPro_success_log.txt"; // Log file for successful actions
-string errorLogFile = "GridMasterPro_error_log.txt";     // Log file for errors
+CTrade trade;
+int    magicNumber;
+double gridDistance;
+double accountEquityStart;
+bool   gridPaused = false;
+string logFile;
 
 //+------------------------------------------------------------------+
-//| Expert initialization function                                   |
+//| Expert initialization                                            |
 //+------------------------------------------------------------------+
 int OnInit() {
-    ArrayResize(gridLevels, MaxOrders);     // Resize grid levels array to the maximum number of orders
+    // Generate collision-safe magic number: base + symbol hash + timeframe
+    magicNumber = MagicBase + (int)(StringLen(_Symbol) * 1000) + (int)Period();
+    trade.SetExpertMagicNumber(magicNumber);
+    trade.SetDeviationInPoints(50);
+    trade.SetTypeFilling(ORDER_FILLING_IOC);
+
+    accountEquityStart = AccountInfoDouble(ACCOUNT_EQUITY);
+    logFile = "GridMasterPro_" + _Symbol + "_" + IntegerToString(Period()) + ".log";
+
+    WriteLog("GridMaster Pro v2.00 initialized | Magic: " + IntegerToString(magicNumber) +
+             " | Symbol: " + _Symbol + " | Grid mode: " + EnumToString(GridMode));
+
     return INIT_SUCCEEDED;
 }
 
 //+------------------------------------------------------------------+
-//| Expert tick function                                             |
+//| Expert deinitialization                                          |
+//+------------------------------------------------------------------+
+void OnDeinit(const int reason) {
+    WriteLog("EA deinitialized. Reason: " + IntegerToString(reason) + " | Open positions left: " + IntegerToString(CountOurPositions(ORDER_TYPE_BUY) + CountOurPositions(ORDER_TYPE_SELL)));
+}
+
+//+------------------------------------------------------------------+
+//| Expert tick                                                      |
 //+------------------------------------------------------------------+
 void OnTick() {
-    // Ensure the gridLevels array is correctly sized
-    if (ArraySize(gridLevels) != MaxOrders) {
-        ArrayResize(gridLevels, MaxOrders);
+    // Drawdown check
+    if (CloseOnDrawdown && CheckDrawdown()) {
+        if (!gridPaused) {
+            WriteLog("DRAWDOWN LIMIT REACHED — closing all positions and pausing grid");
+            CloseAllPositions();
+            gridPaused = true;
+        }
+        return;
     }
 
-    double lastPrice = SymbolInfoDouble(_Symbol, SYMBOL_BID); // Current market price
-    double gridDistance = CalculateDynamicGridDistance();     // Calculate dynamic grid distance
-    double tp = 0, sl = 0;                // Initialize Take Profit and Stop Loss variables
-
-    // Modify existing orders' SL and TP if necessary
-    for (int i = 0; i < PositionsTotal(); i++) {
-        if (PositionSelect(_Symbol)) {
-            ulong ticket = PositionGetInteger(POSITION_TICKET); // Get the position ticket
-            double openPrice = PositionGetDouble(POSITION_PRICE_OPEN); // Get the open price of the position
-            DetermineTPAndSL(tp, sl, lastPrice, openPrice); // Determine Take Profit and Stop Loss levels
-            
-            // Modify the order if the Stop Loss has changed
-            if (PositionGetDouble(POSITION_SL) != sl) {
-                ModifyOrder(ticket, openPrice, sl, tp);
-            }
+    // Resume grid if paused and equity has recovered
+    if (gridPaused) {
+        double currentEquity = AccountInfoDouble(ACCOUNT_EQUITY);
+        if (currentEquity >= accountEquityStart * (1.0 - MaxDrawdownPct / 200.0)) {
+            gridPaused = false;
+            accountEquityStart = currentEquity;
+            WriteLog("Grid resumed after equity recovery");
         } else {
-            Print("Failed to select position for symbol: ", _Symbol);
-            break;
+            return;
         }
     }
 
-    // If no orders are placed yet, open the first order
-    if (ordersCount == 0) {
-        gridLevels[0] = lastPrice; // Set the first grid level at the current price
-        if (OpenOrder(ORDER_TYPE_BUY, LotSize, lastPrice, sl, tp)) {
-            ordersCount++;
-        }
-    }
-
-    // Check if new orders should be placed based on grid distance
-    for (int i = 0; i < ordersCount && i < MaxOrders - 1; i++) {
-        if (lastPrice > gridLevels[i] + gridDistance * _Point) {
-            gridLevels[i + 1] = lastPrice; // Set the next grid level
-            if (OpenOrder(ORDER_TYPE_BUY, LotSize, lastPrice, sl, tp)) {
-                ordersCount++;
-            }
-        }
-    }
-}
-
-//+------------------------------------------------------------------+
-//| Calculate dynamic grid distance based on ATR                     |
-//+------------------------------------------------------------------+
-double CalculateDynamicGridDistance() {
-    double atr = iATR(_Symbol, 0, ATRPeriod); // Get ATR value
-    return atr * ATRMultiplier;              // Calculate grid distance
-}
-
-//+------------------------------------------------------------------+
-//| Determine Take Profit and Stop Loss levels                       |
-//+------------------------------------------------------------------+
-void DetermineTPAndSL(double& tp, double& sl, double lastPrice, double openPrice) {
-    tp = 0;
-    sl = 0;
-
-    if (UseTakeProfit) {
-        tp = lastPrice + DefaultTP * _Point; // Calculate Take Profit level
-    }
-
-    if (UseStopLoss) {
-        if (UseTrailingStop) {
-            double newSL = lastPrice - TrailingStopPoints * _Point; // Calculate Trailing Stop level
-            sl = MathMax(sl, newSL); // Set Stop Loss to the maximum of the existing or new SL
-        } else {
-            sl = openPrice - DefaultSL * _Point; // Set Stop Loss based on the default value
-        }
-    }
-}
-
-//+------------------------------------------------------------------+
-//| Open a new order                                                  |
-//+------------------------------------------------------------------+
-bool OpenOrder(ENUM_ORDER_TYPE orderType, double lotSize, double price, double sl, double tp) {
-    long tradeAllowed;
-    // Check if trading is allowed for the symbol
-    if (!SymbolInfoInteger(_Symbol, SYMBOL_TRADE_MODE, tradeAllowed) || tradeAllowed != SYMBOL_TRADE_MODE_FULL) {
-        string errorMsg = "Trading not allowed for symbol: " + _Symbol;
-        Print(errorMsg);
-        WriteLog(errorLogFile, errorMsg, true);
-        return false;
-    }
+    // Recalculate grid distance every tick
+    gridDistance = CalculateGridDistance();
+    if (gridDistance <= 0) return;
 
     double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
     double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
-    if (bid == 0.0 || ask == 0.0) {
-        string errorMsg = "No prices available for symbol: " + _Symbol;
-        Print(errorMsg);
-        WriteLog(errorLogFile, errorMsg, true);
-        return false;
+
+    int buyCount  = CountOurPositions(ORDER_TYPE_BUY);
+    int sellCount = CountOurPositions(ORDER_TYPE_SELL);
+
+    // Manage trailing stops
+    if (UseTrailingStop) ManageTrailingStops();
+
+    // Place BUY grid orders
+    if (GridMode != GRID_BEARISH && buyCount < MaxOrders) {
+        double buyPrice = ask - gridDistance * (buyCount + 1) * _Point;
+        PlaceGridOrder(ORDER_TYPE_BUY, buyPrice);
     }
 
-    MqlTradeRequest request;
-    MqlTradeResult result;
-    ZeroMemory(request);
-    ZeroMemory(result);
+    // Place SELL grid orders
+    if (GridMode != GRID_BULLISH && sellCount < MaxOrders) {
+        double sellPrice = bid + gridDistance * (sellCount + 1) * _Point;
+        PlaceGridOrder(ORDER_TYPE_SELL, sellPrice);
+    }
+}
 
-    // Fill the trade request
-    request.action = TRADE_ACTION_DEAL;
-    request.symbol = _Symbol;
-    request.volume = lotSize;
-    request.type = orderType;
-    request.price = price;
-    request.sl = sl;
-    request.tp = tp;
-    request.deviation = 50;
-    request.magic = GenerateMagicNumber();
-    request.comment = "Grid Order";
-    request.type_filling = ORDER_FILLING_IOC;
+//+------------------------------------------------------------------+
+//| Place a grid order with proper SL/TP                            |
+//+------------------------------------------------------------------+
+void PlaceGridOrder(ENUM_ORDER_TYPE type, double price) {
+    // Check if order already exists near this price level
+    if (OrderExistsNearPrice(type, price, gridDistance * 0.5 * _Point)) return;
 
-    // Retry mechanism for order placement
-    const int maxRetries = 5;
-    int retries = 0;
-    int waitTime = 2000;
+    // Broker minimum stop distance
+    long stopLevel = SymbolInfoInteger(_Symbol, SYMBOL_TRADE_STOPS_LEVEL);
+    double minStop = MathMax((double)stopLevel, 10.0) * _Point * 1.2; // 20% buffer over broker min
 
-    while (retries < maxRetries) {
-        if (OrderSend(request, result)) {
-            WriteLog(successLogFile, "Order placed successfully. Order ticket: " + IntegerToString(result.order), true);
-            return true;
+    double sl = 0, tp = 0;
+    double lot = CalculateLot();
+
+    if (type == ORDER_TYPE_BUY) {
+        if (UseTakeProfit) tp = price + MathMax(DefaultTP * _Point, minStop * 1.5);
+        if (UseStopLoss)   sl = price - MathMax(DefaultSL * _Point, minStop * MaxOrders);
+    } else {
+        if (UseTakeProfit) tp = price - MathMax(DefaultTP * _Point, minStop * 1.5);
+        if (UseStopLoss)   sl = price + MathMax(DefaultSL * _Point, minStop * MaxOrders);
+    }
+
+    // Normalize prices
+    int digits = (int)SymbolInfoInteger(_Symbol, SYMBOL_DIGITS);
+    price = NormalizeDouble(price, digits);
+    sl    = sl > 0 ? NormalizeDouble(sl, digits) : 0;
+    tp    = tp > 0 ? NormalizeDouble(tp, digits) : 0;
+
+    bool sent;
+    if (type == ORDER_TYPE_BUY) {
+        sent = trade.Buy(lot, _Symbol, 0, sl, tp, "Grid BUY");
+    } else {
+        sent = trade.Sell(lot, _Symbol, 0, sl, tp, "Grid SELL");
+    }
+
+    if (sent) {
+        WriteLog("Placed " + (type == ORDER_TYPE_BUY ? "BUY" : "SELL") +
+                 " | Lot: " + DoubleToString(lot, 2) +
+                 " | Price: ~" + DoubleToString(price, digits) +
+                 " | SL: " + DoubleToString(sl, digits) +
+                 " | TP: " + DoubleToString(tp, digits));
+    } else {
+        WriteLog("FAILED to place " + (type == ORDER_TYPE_BUY ? "BUY" : "SELL") +
+                 " | Error: " + IntegerToString(GetLastError()) +
+                 " | Price: " + DoubleToString(price, digits) +
+                 " | MinStop: " + DoubleToString(minStop / _Point, 0) + " pts");
+    }
+}
+
+//+------------------------------------------------------------------+
+//| Manage trailing stops for all our positions                      |
+//+------------------------------------------------------------------+
+void ManageTrailingStops() {
+    double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+    double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+    int digits = (int)SymbolInfoInteger(_Symbol, SYMBOL_DIGITS);
+    long stopLevel = SymbolInfoInteger(_Symbol, SYMBOL_TRADE_STOPS_LEVEL);
+    double minStop = MathMax((double)stopLevel, 10.0) * _Point * 1.2;
+
+    for (int i = PositionsTotal() - 1; i >= 0; i--) {
+        if (!PositionSelectByTicket(PositionGetTicket(i))) continue;
+        if (PositionGetString(POSITION_SYMBOL) != _Symbol) continue;
+        if (PositionGetInteger(POSITION_MAGIC) != magicNumber) continue;
+
+        ENUM_POSITION_TYPE posType = (ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE);
+        double openPrice = PositionGetDouble(POSITION_PRICE_OPEN);
+        double currentSL = PositionGetDouble(POSITION_SL);
+        ulong ticket = PositionGetInteger(POSITION_TICKET);
+
+        double newSL = 0;
+
+        if (posType == POSITION_TYPE_BUY) {
+            double profit = bid - openPrice;
+            if (profit >= TrailingPoints * _Point) {
+                newSL = NormalizeDouble(bid - TrailingPoints * _Point, digits);
+                if (newSL > currentSL + TrailingStep * _Point && newSL > openPrice - minStop) {
+                    trade.PositionModify(ticket, newSL, PositionGetDouble(POSITION_TP));
+                }
+            }
         } else {
-            int errorCode = GetLastError();
-            string errorMsg = "Order placement failed. Error code: " + IntegerToString(errorCode) + ". " + ErrorDescription(errorCode);
-            Print(errorMsg);
-            WriteLog(errorLogFile, errorMsg, true);
-
-            retries++;
-            waitTime = waitTime * 2 + (MathRand() % 1000); // Exponential backoff with some randomness
-            Sleep(waitTime);
+            double profit = openPrice - ask;
+            if (profit >= TrailingPoints * _Point) {
+                newSL = NormalizeDouble(ask + TrailingPoints * _Point, digits);
+                if ((currentSL == 0 || newSL < currentSL - TrailingStep * _Point) && newSL < openPrice + minStop) {
+                    trade.PositionModify(ticket, newSL, PositionGetDouble(POSITION_TP));
+                }
+            }
         }
     }
+}
 
-    // Log final failure after exhausting retries
-    string finalErrorMsg = "Order placement failed after " + IntegerToString(maxRetries) + " retries.";
-    Print(finalErrorMsg);
-    WriteLog(errorLogFile, finalErrorMsg, true);
+//+------------------------------------------------------------------+
+//| Calculate ATR-based grid distance in points                      |
+//+------------------------------------------------------------------+
+double CalculateGridDistance() {
+    double atr = iATR(_Symbol, 0, ATRPeriod);
+    if (atr <= 0) return 0;
+    return (atr * ATRMultiplier) / _Point; // Return in points
+}
 
+//+------------------------------------------------------------------+
+//| Calculate lot size based on mode                                 |
+//+------------------------------------------------------------------+
+double CalculateLot() {
+    if (LotMode == LOT_FIXED) return LotSize;
+
+    double balance   = AccountInfoDouble(ACCOUNT_BALANCE);
+    double tickValue = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_VALUE);
+    double tickSize  = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_SIZE);
+    if (tickValue <= 0 || tickSize <= 0 || DefaultSL <= 0) return LotSize;
+
+    double riskAmount = balance * RiskPercent / 100.0;
+    double slValue    = DefaultSL * _Point / tickSize * tickValue;
+    double lot = NormalizeDouble(riskAmount / slValue, 2);
+
+    double minLot = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN);
+    double maxLot = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MAX);
+    double lotStep = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_STEP);
+
+    lot = MathMax(minLot, MathMin(maxLot, MathRound(lot / lotStep) * lotStep));
+    return lot;
+}
+
+//+------------------------------------------------------------------+
+//| Count our open positions by type                                 |
+//+------------------------------------------------------------------+
+int CountOurPositions(ENUM_ORDER_TYPE type) {
+    int count = 0;
+    for (int i = PositionsTotal() - 1; i >= 0; i--) {
+        if (!PositionSelectByTicket(PositionGetTicket(i))) continue;
+        if (PositionGetString(POSITION_SYMBOL) != _Symbol) continue;
+        if (PositionGetInteger(POSITION_MAGIC) != magicNumber) continue;
+        ENUM_POSITION_TYPE posType = (ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE);
+        if ((type == ORDER_TYPE_BUY && posType == POSITION_TYPE_BUY) ||
+            (type == ORDER_TYPE_SELL && posType == POSITION_TYPE_SELL)) {
+            count++;
+        }
+    }
+    return count;
+}
+
+//+------------------------------------------------------------------+
+//| Check if order already exists near a price level                 |
+//+------------------------------------------------------------------+
+bool OrderExistsNearPrice(ENUM_ORDER_TYPE type, double price, double tolerance) {
+    for (int i = PositionsTotal() - 1; i >= 0; i--) {
+        if (!PositionSelectByTicket(PositionGetTicket(i))) continue;
+        if (PositionGetString(POSITION_SYMBOL) != _Symbol) continue;
+        if (PositionGetInteger(POSITION_MAGIC) != magicNumber) continue;
+        ENUM_POSITION_TYPE posType = (ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE);
+        if ((type == ORDER_TYPE_BUY && posType == POSITION_TYPE_BUY) ||
+            (type == ORDER_TYPE_SELL && posType == POSITION_TYPE_SELL)) {
+            double openPrice = PositionGetDouble(POSITION_PRICE_OPEN);
+            if (MathAbs(openPrice - price) <= tolerance) return true;
+        }
+    }
     return false;
 }
 
 //+------------------------------------------------------------------+
-//| Modify an existing order's SL/TP                                 |
+//| Check if drawdown limit breached                                 |
 //+------------------------------------------------------------------+
-bool ModifyOrder(ulong ticket, double price, double sl, double tp) {
-    MqlTradeRequest request;
-    MqlTradeResult result;
-    ZeroMemory(request);
-    ZeroMemory(result);
+bool CheckDrawdown() {
+    double equity  = AccountInfoDouble(ACCOUNT_EQUITY);
+    double maxLoss = accountEquityStart * MaxDrawdownPct / 100.0;
+    return (accountEquityStart - equity) >= maxLoss;
+}
 
-    // Fill the modification request
-    request.action = TRADE_ACTION_SLTP;
-    request.symbol = _Symbol;
-    request.sl = sl;
-    request.tp = tp;
-    request.deviation = 50;
-    request.order = ticket;
-
-    // Send the modification request
-    if (OrderSend(request, result)) {
-        WriteLog(successLogFile, "Order modified successfully. Order ticket: " + IntegerToString(ticket));
-        return true;
-    } else {
-        int errorCode = GetLastError();
-        string errorMsg = "Order modification failed. Error code: " + IntegerToString(errorCode) + ". " + ErrorDescription(errorCode);
-        Print(errorMsg);
-        WriteLog(errorLogFile, errorMsg);
-        return false;
+//+------------------------------------------------------------------+
+//| Close all our positions                                          |
+//+------------------------------------------------------------------+
+void CloseAllPositions() {
+    for (int i = PositionsTotal() - 1; i >= 0; i--) {
+        ulong ticket = PositionGetTicket(i);
+        if (!PositionSelectByTicket(ticket)) continue;
+        if (PositionGetString(POSITION_SYMBOL) != _Symbol) continue;
+        if (PositionGetInteger(POSITION_MAGIC) != magicNumber) continue;
+        trade.PositionClose(ticket);
     }
 }
 
 //+------------------------------------------------------------------+
-//| Generate a magic number for orders                               |
+//| Append log to file (fixes overwrite bug)                         |
 //+------------------------------------------------------------------+
-int GenerateMagicNumber() {
-    if (StringLen(_Symbol) < 6) {
-        Print("Error: Symbol name too short");
-        return -1;
-    }
+void WriteLog(string message) {
+    if (!DebugMode && StringFind(message, "FAILED") < 0 && StringFind(message, "DRAWDOWN") < 0) return;
 
-    long symbolHash = 0;
-    for (int i = 0; i < StringLen(_Symbol); i++) {
-        symbolHash += StringToInteger(StringSubstr(_Symbol, i, 1)) * i;
-    }
-
-    return int(symbolHash) % 10000; // Return a 4-digit magic number
-}
-
-//+------------------------------------------------------------------+
-//| Log function to write messages to a log file                     |
-//+------------------------------------------------------------------+
-void WriteLog(string filename, string message, bool addTimestamp = false) {
-    int handle = FileOpen(filename, FILE_WRITE | FILE_CSV | FILE_ANSI | FILE_COMMON, ';');
+    int handle = FileOpen(logFile, FILE_READ | FILE_WRITE | FILE_TXT | FILE_COMMON);
     if (handle != INVALID_HANDLE) {
-        if (addTimestamp) {
-            message = TimeToString(TimeCurrent(), TIME_DATE | TIME_MINUTES) + " - " + message;
-        }
-        FileWrite(handle, message);
+        FileSeek(handle, 0, SEEK_END); // Append — seek to end
+        string ts = TimeToString(TimeCurrent(), TIME_DATE | TIME_MINUTES | TIME_SECONDS);
+        FileWriteString(handle, ts + " | " + message + "\n");
         FileClose(handle);
-    } else {
-        Print("Failed to open log file: ", filename);
-    }
-}
-
-//+------------------------------------------------------------------+
-//| Error Description helper function                                |
-//+------------------------------------------------------------------+
-string ErrorDescription(int errorCode) {
-    switch (errorCode) {
-        case 10004: return "Requote";
-        case 10006: return "Request rejected";
-        case 10008: return "Order placed";
-        case 10009: return "Request completed";
-        case 10012: return "Request canceled by timeout";
-        case 10017: return "Trade is disabled";
-        case 10018: return "Market is closed";
-        case 10019: return "Not enough money to complete the request";
-        case 10020: return "Prices changed";
-        case 10021: return "No quotes to process the request";
-        case 10024: return "Too frequent requests";
-        default: return "Unknown error";
     }
 }
