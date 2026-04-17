@@ -1,60 +1,60 @@
 //+------------------------------------------------------------------+
-//|                                        GridMasterPro_v2.1.mq5     |
-//|                                           Copyright 2026, wangxiaozhi.  |
-//|                    https://www.mql5.com/en/users/wangxiaozhi  |
+//|                                       GridMasterPro_v2.1.mq5     |
+//|                                    Copyright 2026, wangxiaozhi.  |
+//|                       https://www.mql5.com/en/users/wangxiaozhi  |
 //+------------------------------------------------------------------+
 #property copyright "Copyright 2026, wangxiaozhi."
 #property link      "https://www.mql5.com/en/users/wangxiaozhi"
 #property version   "2.10"
 #property strict
-#property description "GridMaster Pro v2.1 — Fixed bi-directional ATR grid with pending orders, proper MM, and drawdown protection."
+#property description "GridMaster Pro v2.1 — 双向ATR网格挂单交易系统，含资金管理和回撤保护。"
 
 #include <Trade\Trade.mqh>
 
-//--- Enums
+//--- 枚举定义
 enum ENUM_GRID_MODE {
-    GRID_NEUTRAL  = 0,  // Neutral: BUY below + SELL above
-    GRID_BULLISH  = 1,  // Bullish: BUY only
-    GRID_BEARISH  = 2,  // Bearish: SELL only
+    GRID_NEUTRAL  = 0,  // 中性模式：下方做多 + 上方做空
+    GRID_BULLISH  = 1,  // 看多模式：仅做多
+    GRID_BEARISH  = 2,  // 看空模式：仅做空
 };
 
 enum ENUM_LOT_MODE {
-    LOT_FIXED     = 0,  // Fixed lot size
-    LOT_DYNAMIC   = 1,  // Risk-based (% of balance per order)
+    LOT_FIXED     = 0,  // 固定手数
+    LOT_DYNAMIC   = 1,  // 动态手数（按余额百分比计算风险）
 };
 
-//--- Input Parameters — Grid
-input ENUM_GRID_MODE GridMode        = GRID_NEUTRAL;   // Grid Mode
-input int            MaxOrders       = 5;              // Max orders per side
-input int            ATRPeriod       = 14;             // ATR period
-input double         ATRMultiplier   = 1.5;            // ATR multiplier for grid distance
+//--- 输入参数 — 网格设置
+input ENUM_GRID_MODE GridMode        = GRID_NEUTRAL;   // 网格模式
+input int            MaxOrders       = 5;              // 每侧最大订单数
+input int            ATRPeriod       = 14;             // ATR 周期
+input double         ATRMultiplier   = 1.5;            // ATR 乘数（计算网格间距）
 
-//--- Input Parameters — Orders
-input ENUM_LOT_MODE  LotMode         = LOT_FIXED;      // Lot sizing mode
-input double         LotSize         = 0.1;            // Fixed lot size
-input double         RiskPercent     = 1.0;            // Risk % per order (dynamic mode)
-input bool           UseTakeProfit   = true;           // Enable Take Profit
-input double         DefaultTP       = 200.0;          // TP distance in points
-input bool           UseStopLoss     = true;           // Enable Stop Loss
-input double         DefaultSL       = 1000.0;         // SL distance in points
-input bool           UseTrailingStop = true;           // Enable Trailing Stop
-input double         TrailingPoints  = 100.0;          // Trailing activation in points
-input double         TrailingStep    = 20.0;           // Min trailing move in points
+//--- 输入参数 — 订单设置
+input ENUM_LOT_MODE  LotMode         = LOT_FIXED;      // 手数模式
+input double         LotSize         = 0.1;            // 固定手数
+input double         RiskPercent     = 1.0;            // 每单风险百分比（动态模式）
+input bool           UseTakeProfit   = true;           // 启用止盈
+input double         DefaultTP       = 200.0;          // 止盈距离（点）
+input bool           UseStopLoss     = true;           // 启用止损
+input double         DefaultSL       = 1000.0;         // 止损距离（点）
+input bool           UseTrailingStop = true;           // 启用移动止损
+input double         TrailingPoints  = 100.0;          // 移动止损激活距离（点）
+input double         TrailingStep    = 20.0;           // 移动止损最小步距（点）
 
-//--- Input Parameters — Risk Management
-input double         MaxDrawdownPct  = 5.0;            // Max drawdown % before pausing
-input bool           CloseOnDrawdown = true;           // Close all on drawdown breach
+//--- 输入参数 — 风控管理
+input double         MaxDrawdownPct  = 5.0;            // 最大回撤百分比（触发暂停）
+input bool           CloseOnDrawdown = true;           // 回撤超限是否平掉所有仓位
 
-//--- Input Parameters — Filters & Debug
-input int            MaxSpreadPoints = 50;             // Max spread (points) to allow trading
-input int            MagicBase       = 47291;          // Base magic number
-input bool           DebugMode       = false;          // Enable debug logging
+//--- 输入参数 — 过滤器与调试
+input int            MaxSpreadPoints = 50;             // 允许交易的最大点差（点）
+input int            MagicBase       = 47291;          // 基础魔术号
+input bool           DebugMode       = false;          // 启用调试日志
 
-//--- Global Variables
+//--- 全局变量
 CTrade   trade;
 int      magicNumber;
-double   gridDistance;           // Grid spacing in price units (not points)
-double   accountEquityStart;     // Baseline equity — never reset after recovery
+double   gridDistance;           // 网格间距（价格单位，非点数）
+double   accountEquityStart;     // 基准净值 — 恢复后不重置
 bool     gridPaused   = false;
 string   logFile;
 datetime lastBarTime;
@@ -63,10 +63,10 @@ int      symbolDigits;
 double   symbolPoint;
 
 //+------------------------------------------------------------------+
-//| Expert initialization                                            |
+//| EA 初始化                                                        |
 //+------------------------------------------------------------------+
 int OnInit() {
-    // Collision-safe magic number
+    // 防冲突魔术号
     magicNumber = MagicBase + (int)(StringLen(_Symbol) * 1000) + (int)Period();
     trade.SetExpertMagicNumber(magicNumber);
     trade.SetDeviationInPoints(50);
@@ -79,14 +79,14 @@ int OnInit() {
     logFile     = "GridMasterPro_" + _Symbol + "_" + IntegerToString(Period()) + ".log";
     lastBarTime = 0;
 
-    // Create ATR indicator handle (proper MQL5 way)
+    // 创建 ATR 指标句柄（标准 MQL5 方式）
     atrHandle = iATR(_Symbol, PERIOD_CURRENT, ATRPeriod);
     if (atrHandle == INVALID_HANDLE) {
         WriteLog("FAILED to create ATR indicator handle");
         return INIT_FAILED;
     }
 
-    // Initial grid distance
+    // 初始网格间距
     gridDistance = CalculateGridDistance();
     if (gridDistance <= 0) {
         WriteLog("WARNING: Initial ATR is zero, grid will activate on first valid bar");
@@ -99,7 +99,7 @@ int OnInit() {
 }
 
 //+------------------------------------------------------------------+
-//| Expert deinitialization                                          |
+//| EA 反初始化                                                      |
 //+------------------------------------------------------------------+
 void OnDeinit(const int reason) {
     CancelAllPendingOrders();
@@ -109,13 +109,13 @@ void OnDeinit(const int reason) {
 }
 
 //+------------------------------------------------------------------+
-//| Expert tick function                                             |
+//| EA Tick 函数                                                     |
 //+------------------------------------------------------------------+
 void OnTick() {
-    // --- Precondition checks ---
+    // --- 前置条件检查 ---
     if (!IsMarketActive()) return;
 
-    // --- Drawdown protection ---
+    // --- 回撤保护 ---
     if (CloseOnDrawdown && CheckDrawdown()) {
         if (!gridPaused) {
             WriteLog("DRAWDOWN LIMIT REACHED — closing all and pausing");
@@ -126,7 +126,7 @@ void OnTick() {
         return;
     }
 
-    // --- Recovery check (baseline NOT reset) ---
+    // --- 恢复检查（基准不重置） ---
     if (gridPaused) {
         if (CheckRecovery()) {
             gridPaused = false;
@@ -136,7 +136,7 @@ void OnTick() {
         }
     }
 
-    // --- Update grid distance on new bar only ---
+    // --- 仅在新K线时更新网格间距 ---
     bool newBar = IsNewBar();
     if (newBar) {
         double newDist = CalculateGridDistance();
@@ -145,7 +145,7 @@ void OnTick() {
 
     if (gridDistance <= 0) return;
 
-    // --- Spread filter ---
+    // --- 点差过滤 ---
     long spread = SymbolInfoInteger(_Symbol, SYMBOL_SPREAD);
     if (spread > MaxSpreadPoints) {
         if (newBar && DebugMode)
@@ -153,15 +153,15 @@ void OnTick() {
         return;
     }
 
-    // --- Trailing stop management ---
+    // --- 移动止损管理 ---
     if (UseTrailingStop) ManageTrailingStops();
 
-    // --- Grid pending order management ---
+    // --- 网格挂单管理 ---
     ManageGridOrders();
 }
 
 //+------------------------------------------------------------------+
-//| Detect broker-supported fill type                                |
+//| 检测经纪商支持的成交类型                                          |
 //+------------------------------------------------------------------+
 ENUM_ORDER_TYPE_FILLING DetectFillType() {
     long fillMode = SymbolInfoInteger(_Symbol, SYMBOL_FILLING_MODE);
@@ -171,7 +171,7 @@ ENUM_ORDER_TYPE_FILLING DetectFillType() {
 }
 
 //+------------------------------------------------------------------+
-//| Check if market is active and trading is allowed                 |
+//| 检查市场是否活跃且允许交易                                       |
 //+------------------------------------------------------------------+
 bool IsMarketActive() {
     if (!TerminalInfoInteger(TERMINAL_TRADE_ALLOWED)) return false;
@@ -180,7 +180,7 @@ bool IsMarketActive() {
     long tradeMode = SymbolInfoInteger(_Symbol, SYMBOL_TRADE_MODE);
     if (tradeMode != SYMBOL_TRADE_MODE_FULL) return false;
 
-    // Weekend check
+    // 周末检查
     MqlDateTime dt;
     TimeToStruct(TimeCurrent(), dt);
     if (dt.day_of_week == 0 || dt.day_of_week == 6) return false;
@@ -189,7 +189,7 @@ bool IsMarketActive() {
 }
 
 //+------------------------------------------------------------------+
-//| New bar detection                                                |
+//| 新K线检测                                                        |
 //+------------------------------------------------------------------+
 bool IsNewBar() {
     datetime currentBarTime = iTime(_Symbol, PERIOD_CURRENT, 0);
@@ -201,27 +201,27 @@ bool IsNewBar() {
 }
 
 //+------------------------------------------------------------------+
-//| ATR-based grid distance (in price units) using completed bar     |
+//| 基于ATR计算网格间距（价格单位），使用已完成的K线                 |
 //+------------------------------------------------------------------+
 double CalculateGridDistance() {
     if (atrHandle == INVALID_HANDLE) return 0;
     double atr[];
     ArraySetAsSeries(atr, true);
-    // Read bar index 1 (last completed bar) for stability
+    // 读取K线索引1（上一根已完成的K线）以确保稳定性
     if (CopyBuffer(atrHandle, 0, 1, 1, atr) <= 0) return 0;
     if (atr[0] <= 0) return 0;
-    return atr[0] * ATRMultiplier;   // Price units, not points
+    return atr[0] * ATRMultiplier;   // 返回价格单位，非点数
 }
 
 //+------------------------------------------------------------------+
-//| Manage pending grid orders — place BuyLimit/SellLimit            |
+//| 管理网格挂单 — 放置BuyLimit/SellLimit                           |
 //+------------------------------------------------------------------+
 void ManageGridOrders() {
     double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
     double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
-    double minDist = GetMinStopDistance();   // Min distance from current price
+    double minDist = GetMinStopDistance();   // 距当前价格的最小距离
 
-    // --- BUY side ---
+    // --- 做多侧 ---
     if (GridMode != GRID_BEARISH) {
         int buyPos  = CountPositions(POSITION_TYPE_BUY);
         int buyPend = CountPendingOrders(ORDER_TYPE_BUY_LIMIT);
@@ -231,14 +231,14 @@ void ManageGridOrders() {
             double lowest = GetLowestBuyEntry();
 
             if (lowest > 0) {
-                // Expand grid: place one level below the lowest existing entry
+                // 扩展网格：在最低现有入场价下方放置一个新级别
                 nextLevel = lowest - gridDistance;
             } else {
-                // First BUY level: one grid distance below current Ask
+                // 第一个做多级别：当前Ask价下方一个网格间距
                 nextLevel = ask - gridDistance;
             }
 
-            // BuyLimit must be below Ask with at least minDist gap
+            // BuyLimit 必须低于Ask价且保持至少minDist间距
             if (nextLevel > 0 && nextLevel <= ask - minDist) {
                 if (!OrderExistsNearPrice(nextLevel, gridDistance * 0.3)) {
                     if (CheckMargin(ORDER_TYPE_BUY, nextLevel)) {
@@ -251,7 +251,7 @@ void ManageGridOrders() {
         }
     }
 
-    // --- SELL side ---
+    // --- 做空侧 ---
     if (GridMode != GRID_BULLISH) {
         int sellPos  = CountPositions(POSITION_TYPE_SELL);
         int sellPend = CountPendingOrders(ORDER_TYPE_SELL_LIMIT);
@@ -266,7 +266,7 @@ void ManageGridOrders() {
                 nextLevel = bid + gridDistance;
             }
 
-            // SellLimit must be above Bid with at least minDist gap
+            // SellLimit 必须高于Bid价且保持至少minDist间距
             if (nextLevel > 0 && nextLevel >= bid + minDist) {
                 if (!OrderExistsNearPrice(nextLevel, gridDistance * 0.3)) {
                     if (CheckMargin(ORDER_TYPE_SELL, nextLevel)) {
@@ -281,7 +281,7 @@ void ManageGridOrders() {
 }
 
 //+------------------------------------------------------------------+
-//| Place a pending grid order with SL/TP                           |
+//| 放置带止损/止盈的网格挂单                                       |
 //+------------------------------------------------------------------+
 void PlaceGridOrder(ENUM_ORDER_TYPE type, double price) {
     double minStop = GetMinStopDistance();
@@ -291,12 +291,12 @@ void PlaceGridOrder(ENUM_ORDER_TYPE type, double price) {
     if (type == ORDER_TYPE_BUY_LIMIT) {
         if (UseTakeProfit) tp = price + MathMax(DefaultTP * symbolPoint, minStop);
         if (UseStopLoss)   sl = price - MathMax(DefaultSL * symbolPoint, minStop * MaxOrders);
-    } else { // SELL_LIMIT
+    } else { // SELL_LIMIT（卖出限价）
         if (UseTakeProfit) tp = price - MathMax(DefaultTP * symbolPoint, minStop);
         if (UseStopLoss)   sl = price + MathMax(DefaultSL * symbolPoint, minStop * MaxOrders);
     }
 
-    // Normalize all prices
+    // 标准化所有价格
     price = NormalizeDouble(price, symbolDigits);
     sl    = sl > 0 ? NormalizeDouble(sl, symbolDigits) : 0;
     tp    = tp > 0 ? NormalizeDouble(tp, symbolDigits) : 0;
@@ -323,7 +323,7 @@ void PlaceGridOrder(ENUM_ORDER_TYPE type, double price) {
 }
 
 //+------------------------------------------------------------------+
-//| Trailing stop — only moves SL to lock in profit                  |
+//| 移动止损 — 仅向盈利方向移动止损以锁定利润                       |
 //+------------------------------------------------------------------+
 void ManageTrailingStops() {
     double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
@@ -344,21 +344,21 @@ void ManageTrailingStops() {
             double profit = bid - openPrice;
             if (profit >= TrailingPoints * symbolPoint) {
                 double newSL = NormalizeDouble(bid - TrailingPoints * symbolPoint, symbolDigits);
-                // Only move SL upward, and only by at least TrailingStep
+                // 仅向上移动止损，且移动幅度至少为TrailingStep
                 if (newSL > currentSL + TrailingStep * symbolPoint) {
-                    // Ensure SL is at or above open price (lock in profit)
+                    // 确保止损价不低于开仓价（锁定利润）
                     if (newSL >= openPrice) {
                         trade.PositionModify(ticket, newSL, currentTP);
                     }
                 }
             }
-        } else { // SELL
+        } else { // 卖出仓位
             double profit = openPrice - ask;
             if (profit >= TrailingPoints * symbolPoint) {
                 double newSL = NormalizeDouble(ask + TrailingPoints * symbolPoint, symbolDigits);
-                // Only move SL downward, and only by at least TrailingStep
+                // 仅向下移动止损，且移动幅度至少为TrailingStep
                 if (currentSL == 0 || newSL < currentSL - TrailingStep * symbolPoint) {
-                    // Ensure SL is at or below open price (lock in profit)
+                    // 确保止损价不高于开仓价（锁定利润）
                     if (newSL <= openPrice) {
                         trade.PositionModify(ticket, newSL, currentTP);
                     }
@@ -369,7 +369,7 @@ void ManageTrailingStops() {
 }
 
 //+------------------------------------------------------------------+
-//| Calculate lot size                                               |
+//| 计算手数                                                         |
 //+------------------------------------------------------------------+
 double CalculateLot() {
     if (LotMode == LOT_FIXED) return LotSize;
@@ -390,27 +390,27 @@ double CalculateLot() {
     double maxLot  = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MAX);
     double lotStep = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_STEP);
 
-    // Round down to lotStep (never round up — would exceed risk budget)
+    // 向下取整到lotStep（永不向上取整，避免超出风险预算）
     lot = MathFloor(lot / lotStep) * lotStep;
     lot = MathMax(minLot, MathMin(maxLot, lot));
     return NormalizeDouble(lot, 2);
 }
 
 //+------------------------------------------------------------------+
-//| Margin check before placing order                                |
+//| 下单前保证金检查                                                 |
 //+------------------------------------------------------------------+
 bool CheckMargin(ENUM_ORDER_TYPE type, double price) {
     double margin;
     double lot = CalculateLot();
-    // OrderCalcMargin needs market order type, not pending
+    // OrderCalcMargin需要市价单类型，而非挂单类型
     ENUM_ORDER_TYPE calcType = (type == ORDER_TYPE_BUY_LIMIT) ? ORDER_TYPE_BUY : ORDER_TYPE_SELL;
     if (!OrderCalcMargin(calcType, _Symbol, lot, price, margin)) return false;
     double freeMargin = AccountInfoDouble(ACCOUNT_MARGIN_FREE);
-    return margin <= freeMargin * 0.95;   // Keep 5% buffer
+    return margin <= freeMargin * 0.95;   // 保留5%缓冲
 }
 
 //+------------------------------------------------------------------+
-//| Count open positions by position type                            |
+//| 按仓位类型统计持仓数量                                           |
 //+------------------------------------------------------------------+
 int CountPositions(ENUM_POSITION_TYPE posType) {
     int count = 0;
@@ -426,7 +426,7 @@ int CountPositions(ENUM_POSITION_TYPE posType) {
 }
 
 //+------------------------------------------------------------------+
-//| Count pending orders by order type                               |
+//| 按订单类型统计挂单数量                                           |
 //+------------------------------------------------------------------+
 int CountPendingOrders(ENUM_ORDER_TYPE orderType) {
     int count = 0;
@@ -442,12 +442,12 @@ int CountPendingOrders(ENUM_ORDER_TYPE orderType) {
 }
 
 //+------------------------------------------------------------------+
-//| Get lowest BUY entry price (position or pending)                 |
+//| 获取最低做多入场价（持仓或挂单）                                 |
 //+------------------------------------------------------------------+
 double GetLowestBuyEntry() {
     double lowest = 0;
 
-    // Scan open positions
+    // 扫描持仓
     for (int i = PositionsTotal() - 1; i >= 0; i--) {
         ulong ticket = PositionGetTicket(i);
         if (ticket == 0) continue;
@@ -458,7 +458,7 @@ double GetLowestBuyEntry() {
             if (lowest == 0 || p < lowest) lowest = p;
         }
     }
-    // Scan pending orders
+    // 扫描挂单
     for (int i = OrdersTotal() - 1; i >= 0; i--) {
         ulong ticket = OrderGetTicket(i);
         if (ticket == 0) continue;
@@ -473,7 +473,7 @@ double GetLowestBuyEntry() {
 }
 
 //+------------------------------------------------------------------+
-//| Get highest SELL entry price (position or pending)               |
+//| 获取最高做空入场价（持仓或挂单）                                 |
 //+------------------------------------------------------------------+
 double GetHighestSellEntry() {
     double highest = 0;
@@ -502,10 +502,10 @@ double GetHighestSellEntry() {
 }
 
 //+------------------------------------------------------------------+
-//| Check if position or pending order exists near a price           |
+//| 检查指定价格附近是否存在持仓或挂单                               |
 //+------------------------------------------------------------------+
 bool OrderExistsNearPrice(double price, double tolerance) {
-    // Check open positions
+    // 检查持仓
     for (int i = PositionsTotal() - 1; i >= 0; i--) {
         ulong ticket = PositionGetTicket(i);
         if (ticket == 0) continue;
@@ -514,7 +514,7 @@ bool OrderExistsNearPrice(double price, double tolerance) {
         if (MathAbs(PositionGetDouble(POSITION_PRICE_OPEN) - price) <= tolerance)
             return true;
     }
-    // Check pending orders
+    // 检查挂单
     for (int i = OrdersTotal() - 1; i >= 0; i--) {
         ulong ticket = OrderGetTicket(i);
         if (ticket == 0) continue;
@@ -527,7 +527,7 @@ bool OrderExistsNearPrice(double price, double tolerance) {
 }
 
 //+------------------------------------------------------------------+
-//| Broker minimum stop distance in price units                      |
+//| 经纪商最小止损距离（价格单位）                                   |
 //+------------------------------------------------------------------+
 double GetMinStopDistance() {
     long stopLevel = SymbolInfoInteger(_Symbol, SYMBOL_TRADE_STOPS_LEVEL);
@@ -535,7 +535,7 @@ double GetMinStopDistance() {
 }
 
 //+------------------------------------------------------------------+
-//| Drawdown check                                                   |
+//| 回撤检查                                                         |
 //+------------------------------------------------------------------+
 bool CheckDrawdown() {
     double equity  = AccountInfoDouble(ACCOUNT_EQUITY);
@@ -544,16 +544,16 @@ bool CheckDrawdown() {
 }
 
 //+------------------------------------------------------------------+
-//| Recovery check — baseline is NOT reset                           |
+//| 恢复检查 — 基准不重置                                            |
 //+------------------------------------------------------------------+
 bool CheckRecovery() {
     double equity = AccountInfoDouble(ACCOUNT_EQUITY);
-    // Resume when equity recovers to at least halfway back to baseline
+    // 当净值恢复到基准的至少一半时恢复交易
     return equity >= accountEquityStart * (1.0 - MaxDrawdownPct / 200.0);
 }
 
 //+------------------------------------------------------------------+
-//| Close all our positions                                          |
+//| 平掉所有持仓                                                     |
 //+------------------------------------------------------------------+
 void CloseAllPositions() {
     for (int i = PositionsTotal() - 1; i >= 0; i--) {
@@ -566,7 +566,7 @@ void CloseAllPositions() {
 }
 
 //+------------------------------------------------------------------+
-//| Cancel all our pending orders                                    |
+//| 取消所有挂单                                                     |
 //+------------------------------------------------------------------+
 void CancelAllPendingOrders() {
     for (int i = OrdersTotal() - 1; i >= 0; i--) {
@@ -579,7 +579,7 @@ void CancelAllPendingOrders() {
 }
 
 //+------------------------------------------------------------------+
-//| Logging — key events always logged, debug mode logs everything   |
+//| 日志记录 — 关键事件始终记录，调试模式记录所有信息                |
 //+------------------------------------------------------------------+
 void WriteLog(string message) {
     bool isImportant =
