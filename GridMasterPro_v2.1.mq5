@@ -1,10 +1,10 @@
 //+------------------------------------------------------------------+
 //|                                        GridMasterPro_v2.1.mq5     |
-//|                                           Copyright 2024, Sajid.  |
-//|                    https://www.mql5.com/en/users/sajidmahamud835  |
+//|                                           Copyright 2026, wangxiaozhi.  |
+//|                    https://www.mql5.com/en/users/wangxiaozhi  |
 //+------------------------------------------------------------------+
-#property copyright "Copyright 2024, Sajid."
-#property link      "https://www.mql5.com/en/users/sajidmahamud835"
+#property copyright "Copyright 2026, wangxiaozhi."
+#property link      "https://www.mql5.com/en/users/wangxiaozhi"
 #property version   "2.10"
 #property strict
 #property description "GridMaster Pro v2.1 — Fixed bi-directional ATR grid with pending orders, proper MM, and drawdown protection."
