@@ -5,9 +5,9 @@
 //+------------------------------------------------------------------+
 #property copyright "Copyright 2026, wangxiaozhi."
 #property link      "https://www.mql5.com"
-#property version   "3.0"
+#property version   "3.5"
 #property strict
-#property description "布林带突破 + 动态间距加仓策略（含冷却期）"
+#property description "布林带突破 + 动态间距加仓策略（含冷却期 + 双机制止盈）"
 
 #include <Trade\Trade.mqh>
 
@@ -16,8 +16,9 @@ input int            BB_Period        = 20;             // 布林带周期
 input double         BB_Deviation     = 2.0;            // 布林带标准差倍数
 
 //--- 交易设置
-input double         InitialLot       = 0.01;           // 初始手数
-input double         FirstTP_ATR      = 1.0;            // 首单止盈ATR倍数
+input double         InitialLot       = 0.01;           // 固定初始手数（UseDynamicLot=false时生效）
+input bool           UseDynamicLot    = true;           // 启用动态手数（按余额比例）
+input double         RiskPercent      = 1.0;            // 动态手数：余额风险百分比
 input int            FlatAddCount     = 3;              // 前N笔等量加仓（之后启用斐波那契）
 input int            MaxPositions     = 50;             // 单方向最大持仓数
 input double         ATRAddMultiplier = 2.0;            // 加仓间距基础ATR倍数
@@ -25,14 +26,15 @@ input double         ATRStepIncrement = 0.5;            // 加仓间距递增（
 input int            CooldownBars     = 20;             // 回撤恢复后冷却K线数
 input int            ATRPeriod        = 5;              // ATR周期
 
-//--- 出场设置
+//--- 止盈设置
+input double         FirstTP_ATR      = 1.0;            // 首单止盈ATR倍数
 input double         ProfitTargetPercent = 0.3;         // 整体盈利目标（余额%）
 
 //--- 风控管理
 input double         MaxDrawdownPct   = 30.0;           // 最大回撤百分比
 input int            MaxSpreadPoints  = 50;             // 最大点差（点）
 input bool           AllowBuy         = true;           // 允许做多
-input bool           AllowSell        = false;           // 允许做空
+input bool           AllowSell        = false;          // 允许做空
 input int            MagicBase        = 47291;          // 魔术号
 input bool           DebugMode        = false;          // 调试模式
 
@@ -80,8 +82,11 @@ int OnInit() {
         return INIT_FAILED;
     }
 
-    WriteLog("GridMaster Pro v3.0 initialized | Magic: " + IntegerToString(magicNumber) +
-             " | Symbol: " + _Symbol + " | Strategy: BB Breakout + Dynamic Grid + Cooldown");
+    WriteLog("GridMaster Pro v3.5 initialized | Magic: " + IntegerToString(magicNumber) +
+             " | Symbol: " + _Symbol + " | Strategy: BB Breakout + Dynamic Grid + Cooldown" +
+             " | FirstTP: ATR x" + DoubleToString(FirstTP_ATR, 1) +
+             " | BasketTarget: " + DoubleToString(ProfitTargetPercent, 1) + "%" +
+             " | DynamicLot: " + (UseDynamicLot ? "ON " + DoubleToString(RiskPercent, 1) + "%" : "OFF"));
 
     return INIT_SUCCEEDED;
 }
@@ -154,7 +159,7 @@ void OnTick() {
 
     // 做多：Ask突破布林带上轨，且当前无多头持仓
     if (!inCooldown && AllowBuy && ask > upperBB && buyCount == 0) {
-        double lot = NormalizeLot(InitialLot);
+        double lot = CalcDynamicLot();
         if (CheckMargin(ORDER_TYPE_BUY, ask, lot)) {
             if (trade.Buy(lot, _Symbol, ask, 0, 0, "BB BUY #1")) {
                 WriteLog("BB BREAKOUT BUY #1 | Price: " + DoubleToString(ask, symbolDigits) +
@@ -166,7 +171,7 @@ void OnTick() {
 
     // 做空：Bid跌破布林带下轨，且当前无空头持仓
     if (!inCooldown && AllowSell && bid < lowerBB && sellCount == 0) {
-        double lot = NormalizeLot(InitialLot);
+        double lot = CalcDynamicLot();
         if (CheckMargin(ORDER_TYPE_SELL, bid, lot)) {
             if (trade.Sell(lot, _Symbol, bid, 0, 0, "BB SELL #1")) {
                 WriteLog("BB BREAKOUT SELL #1 | Price: " + DoubleToString(bid, symbolDigits) +
@@ -265,8 +270,8 @@ void CheckMartingale(ENUM_POSITION_TYPE dir, double currentPrice, double atr) {
     // 加仓手数计算：前 FlatAddCount 笔等量，之后斐波那契递增
     double newLot;
     if (count < FlatAddCount) {
-        // 等量加仓：保持初始手数
-        newLot = NormalizeLot(InitialLot);
+        // 等量加仓：使用动态手数
+        newLot = CalcDynamicLot();
     } else {
         // 斐波那契加仓：取最远两笔的手数之和
         double lot1, lot2;
@@ -345,6 +350,24 @@ double NormalizeLot(double lot) {
     lot = MathFloor(lot / lotStep) * lotStep;
     lot = MathMax(minLot, MathMin(maxLot, lot));
     return NormalizeDouble(lot, 2);
+}
+
+//+------------------------------------------------------------------+
+//| 动态手数计算（按账户余额比例）                                    |
+//+------------------------------------------------------------------+
+double CalcDynamicLot() {
+    if (!UseDynamicLot) return NormalizeLot(InitialLot);
+
+    double balance = AccountInfoDouble(ACCOUNT_BALANCE);
+    double marginForOneLot;
+    if (!OrderCalcMargin(ORDER_TYPE_BUY, _Symbol, 1.0,
+                         SymbolInfoDouble(_Symbol, SYMBOL_ASK), marginForOneLot))
+        return NormalizeLot(InitialLot);
+
+    if (marginForOneLot <= 0) return NormalizeLot(InitialLot);
+
+    double lot = balance * RiskPercent / 100.0 / marginForOneLot;
+    return NormalizeLot(lot);
 }
 
 //+------------------------------------------------------------------+
