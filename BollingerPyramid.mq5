@@ -461,24 +461,15 @@ void OpenPositionAtLevel(int level) {
 }
 
 //+------------------------------------------------------------------+
-//| 更新保护损：为所有非最新活跃层设置保护性止损                     |
+//| 更新保护损：为所有活跃层设置保护性止损                           |
 //+------------------------------------------------------------------+
 void UpdateProtectiveSL() {
    if(!cycleActive) return;
-
-   // 找到最高活跃层
-   int highestActive = -1;
-   for(int i = MaxLevels - 1; i >= 0; i--) {
-      if(levelActive[i]) { highestActive = i; break; }
-   }
-
-   if(highestActive <= 0) return;  // 只有1个仓位或无仓位，不需要保护损
 
    double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
 
    for(int i = 0; i < MaxLevels; i++) {
       if(!levelActive[i]) continue;
-      if(i == highestActive) continue;  // 最新一层不设保护损
 
       ulong ticket = levelTicket[i];
       if(ticket == 0) continue;
