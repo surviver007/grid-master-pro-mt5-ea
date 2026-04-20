@@ -5,21 +5,25 @@
 //+------------------------------------------------------------------+
 #property copyright "Copyright 2026, wangxiaozhi."
 #property link      "https://www.mql5.com"
-#property version   "3.5"
+#property version   "4.0"
 #property strict
-#property description "布林带突破 + 动态间距加仓策略（含冷却期 + 双机制止盈）"
+#property description "连续两根阳线/阴线形态 + 动态间距加仓策略（固定点数止盈）"
 
 #include <Trade\Trade.mqh>
-
-//--- 布林带设置
-input int            BB_Period        = 20;             // 布林带周期
-input double         BB_Deviation     = 2.0;            // 布林带标准差倍数
 
 //--- 交易设置
 input double         InitialLot       = 0.01;           // 固定初始手数（UseDynamicLot=false时生效）
 input bool           UseDynamicLot    = true;           // 启用动态手数（按余额比例）
 input double         RiskPercent      = 1.0;            // 动态手数：余额风险百分比
-input int            FlatAddCount     = 3;              // 前N笔等量加仓（之后启用斐波那契）
+input int            FlatAddCount     = 3;              // 前N笔等量加仓（之后启用加仓模式）
+
+//--- 加仓模式
+enum ENUM_ADD_MODE {
+    ADD_MARTIN   = 0,    // 马丁格尔（上一笔手数 × 倍数）
+    ADD_FIBONACCI = 1    // 斐波那契（最远两笔手数之和）
+};
+input ENUM_ADD_MODE  AddMode          = ADD_MARTIN;     // 加仓手数模式
+input double         MartinMultiplier = 1.2;            // 马丁格尔倍数（上一笔手数 × 此值）
 input int            MaxPositions     = 50;             // 单方向最大持仓数
 input double         ATRAddMultiplier = 2.0;            // 加仓间距基础ATR倍数
 input double         ATRStepIncrement = 0.5;            // 加仓间距递增（每多一笔增加ATR倍数）
@@ -27,8 +31,7 @@ input int            CooldownBars     = 20;             // 回撤恢复后冷却
 input int            ATRPeriod        = 5;              // ATR周期
 
 //--- 止盈设置
-input double         FirstTP_ATR      = 1.0;            // 首单止盈ATR倍数
-input double         ProfitTargetPercent = 0.3;         // 整体盈利目标（余额%）
+input int            TakeProfitPoints = 50;            // 固定止盈点数（距离加权均价）
 
 //--- 风控管理
 input double         MaxDrawdownPct   = 30.0;           // 最大回撤百分比
@@ -43,11 +46,11 @@ CTrade   trade;
 int      magicNumber;
 double   accountEquityStart;
 string   logFile;
-int      bbHandle;
 int      atrHandle;
 int      symbolDigits;
 double   symbolPoint;
 datetime cooldownUntil;
+datetime lastBarTime;
 
 //+------------------------------------------------------------------+
 //| EA 初始化                                                        |
@@ -68,13 +71,6 @@ int OnInit() {
     accountEquityStart = AccountInfoDouble(ACCOUNT_EQUITY);
     logFile     = "GridMasterPro_" + _Symbol + "_" + IntegerToString(Period()) + ".log";
 
-    // 创建布林带指标句柄
-    bbHandle = iBands(_Symbol, PERIOD_CURRENT, BB_Period, 0, BB_Deviation, PRICE_CLOSE);
-    if (bbHandle == INVALID_HANDLE) {
-        WriteLog("FAILED to create BB indicator handle");
-        return INIT_FAILED;
-    }
-
     // 创建 ATR 指标句柄
     atrHandle = iATR(_Symbol, PERIOD_CURRENT, ATRPeriod);
     if (atrHandle == INVALID_HANDLE) {
@@ -82,10 +78,14 @@ int OnInit() {
         return INIT_FAILED;
     }
 
-    WriteLog("GridMaster Pro v3.5 initialized | Magic: " + IntegerToString(magicNumber) +
-             " | Symbol: " + _Symbol + " | Strategy: BB Breakout + Dynamic Grid + Cooldown" +
-             " | FirstTP: ATR x" + DoubleToString(FirstTP_ATR, 1) +
-             " | BasketTarget: " + DoubleToString(ProfitTargetPercent, 1) + "%" +
+    lastBarTime = 0;
+
+    string addModeStr = (AddMode == ADD_MARTIN) ?
+                         "Martin x" + DoubleToString(MartinMultiplier, 1) : "Fibonacci";
+    WriteLog("GridMaster Pro v4.0 initialized | Magic: " + IntegerToString(magicNumber) +
+             " | Symbol: " + _Symbol + " | Strategy: 2-Candle Pattern + Dynamic Grid + Fixed TP" +
+             " | AddMode: " + addModeStr + " after " + IntegerToString(FlatAddCount) + " flat" +
+             " | FixedTP: " + IntegerToString(TakeProfitPoints) + " points" +
              " | DynamicLot: " + (UseDynamicLot ? "ON " + DoubleToString(RiskPercent, 1) + "%" : "OFF"));
 
     return INIT_SUCCEEDED;
@@ -95,7 +95,6 @@ int OnInit() {
 //| EA 反初始化                                                      |
 //+------------------------------------------------------------------+
 void OnDeinit(const int reason) {
-    if (bbHandle != INVALID_HANDLE) IndicatorRelease(bbHandle);
     if (atrHandle != INVALID_HANDLE) IndicatorRelease(atrHandle);
     WriteLog("EA deinitialized. Reason: " + IntegerToString(reason) +
              " | Positions: " + IntegerToString(CountPositions(POSITION_TYPE_BUY) + CountPositions(POSITION_TYPE_SELL)));
@@ -126,62 +125,81 @@ void OnTick() {
     // --- 点差过滤 ---
     if ((long)SymbolInfoInteger(_Symbol, SYMBOL_SPREAD) > MaxSpreadPoints) return;
 
-    // --- 读取布林带和ATR ---
-    double bbUpper[], bbLower[], atrVal[];
-    ArraySetAsSeries(bbUpper, true);
-    ArraySetAsSeries(bbLower, true);
+    // --- 读取ATR ---
+    double atrVal[];
     ArraySetAsSeries(atrVal, true);
+    if (CopyBuffer(atrHandle, 0, 0, 2, atrVal) <= 0) return;
+    double atr = atrVal[1];   // 使用已完成K线的ATR
 
-    if (CopyBuffer(bbHandle, 1, 0, 1, bbUpper) <= 0) return;   // 上轨 = buffer 1
-    if (CopyBuffer(bbHandle, 2, 0, 1, bbLower) <= 0) return;   // 下轨 = buffer 2
-    if (CopyBuffer(atrHandle, 0, 0, 1, atrVal) <= 0) return;
+    double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+    double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
 
-    double upperBB  = bbUpper[0];
-    double lowerBB  = bbLower[0];
-    double atr      = atrVal[0];
-    double ask      = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
-    double bid      = SymbolInfoDouble(_Symbol, SYMBOL_BID);
-
-    // --- 1. 整体盈利目标平仓（多笔持仓时） ---
-    CheckBasketExit(POSITION_TYPE_BUY);
-    CheckBasketExit(POSITION_TYPE_SELL);
-
-    // --- 2. 单笔止盈检查（仅1笔持仓时，基于ATR倍数） ---
-    CheckSingleTP(POSITION_TYPE_BUY, atr);
-    CheckSingleTP(POSITION_TYPE_SELL, atr);
+    // --- 1. 固定点数止盈检查 ---
+    CheckFixedTP(POSITION_TYPE_BUY);
+    CheckFixedTP(POSITION_TYPE_SELL);
 
     // --- 3. 冷却期检查 ---
     bool inCooldown = (cooldownUntil > 0 && iTime(_Symbol, PERIOD_CURRENT, 0) < cooldownUntil);
 
-    // --- 4. 布林带突破入场 ---
+    // --- 4. 新K线检测（避免同根K线重复入场） ---
+    datetime currentBarTime = iTime(_Symbol, PERIOD_CURRENT, 0);
+    if (currentBarTime == lastBarTime) {
+        // 非新K线，跳过入场但继续处理加仓
+        if (atr > 0) {
+            if (AllowBuy)  CheckMartingale(POSITION_TYPE_BUY, ask, atr);
+            if (AllowSell) CheckMartingale(POSITION_TYPE_SELL, bid, atr);
+        }
+        return;
+    }
+    lastBarTime = currentBarTime;
+
+    // --- 5. 读取最近两根已完成K线（bar[1] 和 bar[2]） ---
+    double open1  = iOpen(_Symbol, PERIOD_CURRENT, 1);
+    double close1 = iClose(_Symbol, PERIOD_CURRENT, 1);
+    double open2  = iOpen(_Symbol, PERIOD_CURRENT, 2);
+    double close2 = iClose(_Symbol, PERIOD_CURRENT, 2);
+    double body1  = MathAbs(close1 - open1);
+    double body2  = MathAbs(close2 - open2);
+    bool   isBull1 = (close1 > open1);   // bar[1] 阳线
+    bool   isBear1 = (open1 > close1);   // bar[1] 阴线
+    bool   isBull2 = (close2 > open2);   // bar[2] 阳线
+    bool   isBear2 = (open2 > close2);   // bar[2] 阴线
+    bool   twoBull = (isBull1 && isBull2);  // 连续两根阳线
+    bool   twoBear = (isBear1 && isBear2);  // 连续两根阴线
+
+    // --- 6. K线形态入场 ---
     int buyCount  = CountPositions(POSITION_TYPE_BUY);
     int sellCount = CountPositions(POSITION_TYPE_SELL);
 
-    // 做多：Ask突破布林带上轨，且当前无多头持仓
-    if (!inCooldown && AllowBuy && ask > upperBB && buyCount == 0) {
+    // 做多：连续两根阳线，且当前无多头持仓
+    if (!inCooldown && AllowBuy && twoBull && buyCount == 0) {
         double lot = CalcDynamicLot();
         if (CheckMargin(ORDER_TYPE_BUY, ask, lot)) {
-            if (trade.Buy(lot, _Symbol, ask, 0, 0, "BB BUY #1")) {
-                WriteLog("BB BREAKOUT BUY #1 | Price: " + DoubleToString(ask, symbolDigits) +
-                         " | BB Upper: " + DoubleToString(upperBB, symbolDigits) +
+            if (trade.Buy(lot, _Symbol, ask, 0, 0, "CANDLE BUY #1")) {
+                WriteLog("CANDLE BUY #1 | Price: " + DoubleToString(ask, symbolDigits) +
+                         " | Body1: " + DoubleToString(body1, symbolDigits) +
+                         " Body2: " + DoubleToString(body2, symbolDigits) +
+                         " | ATR: " + DoubleToString(atr, symbolDigits) +
                          " | Lot: " + DoubleToString(lot, 2));
             }
         }
     }
 
-    // 做空：Bid跌破布林带下轨，且当前无空头持仓
-    if (!inCooldown && AllowSell && bid < lowerBB && sellCount == 0) {
+    // 做空：连续两根阴线，且当前无空头持仓
+    if (!inCooldown && AllowSell && twoBear && sellCount == 0) {
         double lot = CalcDynamicLot();
         if (CheckMargin(ORDER_TYPE_SELL, bid, lot)) {
-            if (trade.Sell(lot, _Symbol, bid, 0, 0, "BB SELL #1")) {
-                WriteLog("BB BREAKOUT SELL #1 | Price: " + DoubleToString(bid, symbolDigits) +
-                         " | BB Lower: " + DoubleToString(lowerBB, symbolDigits) +
+            if (trade.Sell(lot, _Symbol, bid, 0, 0, "CANDLE SELL #1")) {
+                WriteLog("CANDLE SELL #1 | Price: " + DoubleToString(bid, symbolDigits) +
+                         " | Body1: " + DoubleToString(body1, symbolDigits) +
+                         " Body2: " + DoubleToString(body2, symbolDigits) +
+                         " | ATR: " + DoubleToString(atr, symbolDigits) +
                          " | Lot: " + DoubleToString(lot, 2));
             }
         }
     }
 
-    // --- 5. 马丁格尔加仓（动态间距） ---
+    // --- 7. 马丁格尔加仓（动态间距） ---
     if (atr > 0) {
         if (AllowBuy)  CheckMartingale(POSITION_TYPE_BUY, ask, atr);
         if (AllowSell) CheckMartingale(POSITION_TYPE_SELL, bid, atr);
@@ -189,55 +207,39 @@ void OnTick() {
 }
 
 //+------------------------------------------------------------------+
-//| 单笔止盈：仅1笔持仓且盈利达到ATR倍数时平仓                       |
+//| 固定点数止盈：加权均价到达固定点数盈利时平掉所有持仓              |
 //+------------------------------------------------------------------+
-void CheckSingleTP(ENUM_POSITION_TYPE dir, double atr) {
-    if (CountPositions(dir) != 1) return;
-    if (atr <= 0) return;
+void CheckFixedTP(ENUM_POSITION_TYPE dir) {
+    int count = CountPositions(dir);
+    if (count <= 0) return;
 
-    double tpDistance = atr * FirstTP_ATR;
+    double avgEntry = GetAvgEntryPrice(dir);
+    if (avgEntry <= 0) return;
+
+    double tpDistance = TakeProfitPoints * symbolPoint;
 
     if (dir == POSITION_TYPE_BUY) {
-        double entryPrice = GetExtremeEntryPrice(dir);
         double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
-        if (bid - entryPrice >= tpDistance) {
+        if (bid - avgEntry >= tpDistance) {
             double profit = GetTotalProfit(dir);
             ClosePositionsByType(dir);
-            WriteLog("Single BUY TP hit | Entry: " + DoubleToString(entryPrice, symbolDigits) +
+            WriteLog("FIXED TP BUY | Positions: " + IntegerToString(count) +
+                     " | AvgEntry: " + DoubleToString(avgEntry, symbolDigits) +
                      " | Exit: " + DoubleToString(bid, symbolDigits) +
+                     " | TP Points: " + IntegerToString(TakeProfitPoints) +
                      " | Profit: " + DoubleToString(profit, 2));
         }
     } else {
-        double entryPrice = GetExtremeEntryPrice(dir);
         double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
-        if (entryPrice - ask >= tpDistance) {
+        if (avgEntry - ask >= tpDistance) {
             double profit = GetTotalProfit(dir);
             ClosePositionsByType(dir);
-            WriteLog("Single SELL TP hit | Entry: " + DoubleToString(entryPrice, symbolDigits) +
+            WriteLog("FIXED TP SELL | Positions: " + IntegerToString(count) +
+                     " | AvgEntry: " + DoubleToString(avgEntry, symbolDigits) +
                      " | Exit: " + DoubleToString(ask, symbolDigits) +
+                     " | TP Points: " + IntegerToString(TakeProfitPoints) +
                      " | Profit: " + DoubleToString(profit, 2));
         }
-    }
-}
-
-//+------------------------------------------------------------------+
-//| 整体盈利目标：多笔持仓时，总盈利达到余额的ProfitTargetPercent    |
-//+------------------------------------------------------------------+
-void CheckBasketExit(ENUM_POSITION_TYPE dir) {
-    if (CountPositions(dir) <= 1) return;
-
-    double totalProfit = GetTotalProfit(dir);
-    double balance     = AccountInfoDouble(ACCOUNT_BALANCE);
-    double target      = balance * ProfitTargetPercent / 100.0;
-
-    if (totalProfit >= target) {
-        string dirStr = (dir == POSITION_TYPE_BUY) ? "BUY" : "SELL";
-        int posCount = CountPositions(dir);
-        ClosePositionsByType(dir);
-        WriteLog("BASKET EXIT " + dirStr +
-                 " | Positions: " + IntegerToString(posCount) +
-                 " | Profit: " + DoubleToString(totalProfit, 2) +
-                 " | Target: " + DoubleToString(target, 2));
     }
 }
 
@@ -267,25 +269,33 @@ void CheckMartingale(ENUM_POSITION_TYPE dir, double currentPrice, double atr) {
 
     if (!shouldAdd) return;
 
-    // 加仓手数计算：前 FlatAddCount 笔等量，之后斐波那契递增
+    // 加仓手数计算：前 FlatAddCount 笔等量，之后按选定模式递增
     double newLot;
+    string addModeStr;
     if (count < FlatAddCount) {
-        // 等量加仓：使用动态手数
+        // 等量加仓
         newLot = CalcDynamicLot();
+        addModeStr = "FLAT";
+    } else if (AddMode == ADD_MARTIN) {
+        // 马丁格尔：取最近一笔的手数 × 倍数
+        double lastLot = GetLastLot(dir);
+        newLot = NormalizeLot(lastLot * MartinMultiplier);
+        addModeStr = "MARTIN x" + DoubleToString(MartinMultiplier, 1);
     } else {
-        // 斐波那契加仓：取最远两笔的手数之和
+        // 斐波那契：最远两笔手数之和
         double lot1, lot2;
         GetTwoExtremeLots(dir, lot1, lot2);
         newLot = NormalizeLot(lot1 + lot2);
+        addModeStr = "FIB";
     }
 
     ENUM_ORDER_TYPE orderType = (dir == POSITION_TYPE_BUY) ? ORDER_TYPE_BUY : ORDER_TYPE_SELL;
     if (!CheckMargin(orderType, currentPrice, newLot)) {
-        if (DebugMode) WriteLog("Insufficient margin for martingale add");
+        if (DebugMode) WriteLog("Insufficient margin for " + addModeStr + " add");
         return;
     }
 
-    string comment = ((dir == POSITION_TYPE_BUY) ? "BB BUY ADD #" : "BB SELL ADD #") +
+    string comment = ((dir == POSITION_TYPE_BUY) ? "BUY ADD #" : "SELL ADD #") +
                      IntegerToString(count + 1);
 
     bool sent = false;
@@ -296,8 +306,7 @@ void CheckMartingale(ENUM_POSITION_TYPE dir, double currentPrice, double atr) {
 
     if (sent) {
         string dirStr = (dir == POSITION_TYPE_BUY) ? "BUY" : "SELL";
-        string addMode = (count < FlatAddCount) ? "FLAT" : "FIB";
-        WriteLog(addMode + " ADD " + dirStr + " #" + IntegerToString(count + 1) +
+        WriteLog(addModeStr + " ADD " + dirStr + " #" + IntegerToString(count + 1) +
                  " | Price: " + DoubleToString(currentPrice, symbolDigits) +
                  " | Lot: " + DoubleToString(newLot, 2) +
                  " | ATR x" + DoubleToString(currentMultiplier, 1) +
@@ -419,6 +428,27 @@ double GetExtremeEntryPrice(ENUM_POSITION_TYPE posType) {
 }
 
 //+------------------------------------------------------------------+
+//| 获取持仓加权平均入场价                                           |
+//+------------------------------------------------------------------+
+double GetAvgEntryPrice(ENUM_POSITION_TYPE posType) {
+    double totalCost   = 0;
+    double totalVolume = 0;
+    for (int i = PositionsTotal() - 1; i >= 0; i--) {
+        ulong ticket = PositionGetTicket(i);
+        if (ticket == 0) continue;
+        if (PositionGetString(POSITION_SYMBOL) != _Symbol) continue;
+        if (PositionGetInteger(POSITION_MAGIC) != magicNumber) continue;
+        if ((ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE) != posType) continue;
+        double p   = PositionGetDouble(POSITION_PRICE_OPEN);
+        double lot = PositionGetDouble(POSITION_VOLUME);
+        totalCost   += p * lot;
+        totalVolume += lot;
+    }
+    if (totalVolume <= 0) return 0;
+    return totalCost / totalVolume;
+}
+
+//+------------------------------------------------------------------+
 //| 获取最远入场价的持仓手数                                         |
 //+------------------------------------------------------------------+
 double GetExtremeEntryLot(ENUM_POSITION_TYPE posType) {
@@ -485,6 +515,28 @@ void GetTwoExtremeLots(ENUM_POSITION_TYPE posType, double &lot1, double &lot2) {
             }
         }
     }
+}
+
+//+------------------------------------------------------------------+
+//| 获取最近一笔持仓的手数（用于马丁格尔加仓）                       |
+//+------------------------------------------------------------------+
+double GetLastLot(ENUM_POSITION_TYPE posType) {
+    datetime latestTime = 0;
+    double   latestLot  = 0;
+    for (int i = PositionsTotal() - 1; i >= 0; i--) {
+        ulong ticket = PositionGetTicket(i);
+        if (ticket == 0) continue;
+        if (PositionGetString(POSITION_SYMBOL) != _Symbol) continue;
+        if (PositionGetInteger(POSITION_MAGIC) != magicNumber) continue;
+        if ((ENUM_POSITION_TYPE)PositionGetInteger(POSITION_TYPE) != posType) continue;
+
+        datetime t = (datetime)PositionGetInteger(POSITION_TIME);
+        if (t > latestTime) {
+            latestTime = t;
+            latestLot  = PositionGetDouble(POSITION_VOLUME);
+        }
+    }
+    return latestLot;
 }
 
 //+------------------------------------------------------------------+
